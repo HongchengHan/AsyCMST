@@ -7,7 +7,6 @@ This repository contains the pre-released code for AsyCMST, a method for asymmet
 - Multimodal ultrasound analysis (B-mode and CEUS)
 - Spatio-temporal learning approach
 - Asymmetric cross-modal integration
-- Pre-trained models and evaluation scripts
 
 ## Data
 
