@@ -45,7 +45,7 @@ datasets/
 ## Requirements
 
 - Python 3.10+
-- PyTorch
+- PyTorch 2.10+
 - Other dependencies (see `requirements.txt` if available, or install via pip)
 
 ## Installation
