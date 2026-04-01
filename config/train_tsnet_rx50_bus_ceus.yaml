@@ -1,0 +1,46 @@
+---
+task: 'BUS-CEUS-Cls'
+params:
+    batch_size: 4
+    epoch: 200
+    lr: 0.001
+    factor: 0.1
+    patience: 5
+    w_decay: 0.0001
+    momentum: 0.9
+    ECLossWeight: [1.0, 1.0]
+model:
+    name: tsnet_rx50
+    pretrain: False
+    load_path: None
+    freeze: False
+save:
+    path: None
+    exp: None
+    num_ckpt: None
+
+data:
+    root_dir: './datasets/XJTU-MMUS-subset-20260401'
+    train_label: 'train_1.csv'
+    valid_label: 'valid_1.csv'
+    test_label: 'test_1.csv'
+    num_class: 2
+    size: 224
+    num_frm: 16
+    header: True
+    name: 'XJTU-MMUS'
+    augment: True
+    aug:
+        resize_crop: True
+        color_jitter: False
+        rotation: True
+        h_flip: True
+        v_flip: True
+
+device:
+    single: 'cuda:0'
+    dp:
+        output_device: 'cuda:0'
+        device_ids: [0, 1]
+    ddp:
+        local_rank: 0
