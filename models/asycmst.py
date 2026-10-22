@@ -1,212 +1,160 @@
+"""AsyCMST model from Medical Image Analysis 112 (2026) 104127."""
 import torch
 import torch.nn as nn
-import torchvision.models as models
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import torch.nn.functional as F
+from torchvision.models import ResNet18_Weights, resnet18
 
-class FrameFeatureEncoding(nn.Module):
-    def __init__(self, embed_dim=384):
-        super(FrameFeatureEncoding, self).__init__()
-        # Load ResNet18 without the final fully connected layer
-        resnet = models.resnet18(pretrained=True)
-        self.encoder = nn.Sequential(*list(resnet.children())[:-2])  # Remove avgpool and fc
-        # 1x1 conv to reduce channels to embed_dim
-        self.conv1x1 = nn.Conv2d(512, embed_dim, kernel_size=1)
-        self.embed_dim = embed_dim
 
-    def forward(self, x):
-        # x: (B, 3, T, H, W) where T=16, H=224, W=224
-        B, C, T, H, W = x.shape
-        # Reshape to (B*T, 3, H, W) for frame-wise processing
-        x = x.view(B * T, C, H, W)
-        # Encode each frame
-        features = self.encoder(x)  # (B*T, 512, 7, 7)
-        # Apply 1x1 conv
-        features = self.conv1x1(features)  # (B*T, embed_dim, 7, 7)
-        # Reshape back to (B, embed_dim, T, 7*7)
-        features = features.view(B, self.embed_dim, T, -1)  # (B, embed_dim, 16, 49)
-        return features
+class FrameFeatureEncoder(nn.Module):
+    def __init__(self, embed_dim=384, pretrained=False):
+        super().__init__()
+        backbone = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
+        self.encoder = nn.Sequential(*list(backbone.children())[:-2])
+        self.projection = nn.Conv2d(512, embed_dim, 1)
+
+    def forward(self, video):
+        b, c, t, h, w = video.shape
+        x = video.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        x = self.projection(self.encoder(x))
+        oh, ow = x.shape[-2:]
+        return x.view(b, t, -1, oh, ow).permute(0, 2, 1, 3, 4)
+
+
+class FrameSelfSorting(nn.Module):
+    def __init__(self, embed_dim, clamp=0.9):
+        super().__init__()
+        self.scorer = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.ReLU(), nn.Linear(embed_dim, 1))
+        self.clamp = clamp
+
+    def forward(self, features):
+        pooled = 0.5 * (features.mean((-1, -2)) + features.amax((-1, -2)))
+        pooled = pooled.transpose(1, 2)  # B, T, C
+        return self.scorer(pooled).squeeze(-1)
+
+    def loss(self, scores):
+        t = scores.shape[1]
+        if t < 2:
+            return scores.sum() * 0
+        # score[j] should be greater than score[i] for every j > i.
+        differences = scores[:, None, :] - scores[:, :, None]
+        upper = torch.triu(torch.ones(t, t, device=scores.device, dtype=torch.bool), diagonal=1)
+        probabilities = torch.sigmoid(differences[:, upper]).clamp(max=self.clamp)
+        return -torch.log(probabilities.clamp_min(1e-7)).mean()
+
+
+class MaskDecoder(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        channels = [embed_dim, 192, 96, 48, 24, 1]
+        layers = []
+        for i in range(5):
+            layers.append(nn.ConvTranspose2d(channels[i], channels[i + 1], 4, 2, 1))
+            if i < 4:
+                layers.extend((nn.BatchNorm2d(channels[i + 1]), nn.ReLU(inplace=True)))
+        self.decoder = nn.Sequential(*layers)
+
+    def forward(self, features, output_size):
+        b, c, t, h, w = features.shape
+        x = features.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        x = F.interpolate(self.decoder(x), size=output_size, mode="bilinear", align_corners=False)
+        return x.view(b, t, *output_size)
+
 
 class AsymmetricCrossAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, mode, T=16, HW=49):
-        super(AsymmetricCrossAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.mode = mode
-        self.T = T
-        self.HW = HW
-        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
+    def __init__(self, embed_dim, num_heads, direction):
+        super().__init__()
+        if embed_dim % num_heads:
+            raise ValueError("embed_dim must be divisible by num_heads")
+        self.embed_dim, self.num_heads = embed_dim, num_heads
+        self.head_dim, self.direction = embed_dim // num_heads, direction
+        self.q_proj, self.k_proj, self.v_proj = (nn.Linear(embed_dim, embed_dim) for _ in range(3))
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-    def forward(self, q, k, v):
-        B, seq_len, _ = q.shape
-        T = self.T
-        HW = self.HW
-        assert seq_len == T * HW
+    def forward(self, query, key_value, frames, locations):
+        b = query.shape[0]
+        q = query.view(b, frames, locations, self.embed_dim)
+        k = key_value.view(b, frames, locations, self.embed_dim)
+        v = key_value.view(b, frames, locations, self.embed_dim)
+        if self.direction == "temporal":
+            q, k, v = (x.permute(0, 2, 1, 3).reshape(b * locations, frames, self.embed_dim) for x in (q, k, v))
+            group, length = b * locations, frames
+        else:
+            q, k, v = (x.reshape(b * frames, locations, self.embed_dim) for x in (q, k, v))
+            group, length = b * frames, locations
+        q = self.q_proj(q).view(group, length, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(k).view(group, length, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(v).view(group, length, self.num_heads, self.head_dim).transpose(1, 2)
+        weights = torch.softmax(q @ k.transpose(-2, -1) / self.head_dim**0.5, -1)
+        out = self.out_proj((weights @ v).transpose(1, 2).reshape(group, length, self.embed_dim))
+        if self.direction == "temporal":
+            out = out.view(b, locations, frames, self.embed_dim).permute(0, 2, 1, 3)
+        else:
+            out = out.view(b, frames, locations, self.embed_dim)
+        return out.reshape(b, frames * locations, self.embed_dim)
 
-        if self.mode == 'branch1':
-            # Q[t,n] attends to K[:,n] BUS-to-CEUS
-            q_reshaped = q.view(B, T, HW, self.embed_dim)
-            k_reshaped = k.view(B, T, HW, self.embed_dim)
-            v_reshaped = v.view(B, T, HW, self.embed_dim)
 
-            # Flatten for attention: (B*HW, T, embed_dim)
-            q_flat = q_reshaped.permute(0, 2, 1, 3).contiguous().view(B * HW, T, self.embed_dim)
-            k_flat = k_reshaped.permute(0, 2, 1, 3).contiguous().view(B * HW, T, self.embed_dim)
-            v_flat = v_reshaped.permute(0, 2, 1, 3).contiguous().view(B * HW, T, self.embed_dim)
+class ACMSTBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, direction, ff_dim=2048, dropout=0.1):
+        super().__init__()
+        self.self_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.cross_attention = AsymmetricCrossAttention(embed_dim, num_heads, direction)
+        self.norms = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(3)])
+        self.ffn = nn.Sequential(nn.Linear(embed_dim, ff_dim), nn.ReLU(), nn.Dropout(dropout),
+                                 nn.Linear(ff_dim, embed_dim), nn.Dropout(dropout))
 
-            # Projections
-            q_p = self.q_proj(q_flat).view(B * HW, T, self.num_heads, self.head_dim).transpose(1, 2)
-            k_p = self.k_proj(k_flat).view(B * HW, T, self.num_heads, self.head_dim).transpose(1, 2)
-            v_p = self.v_proj(v_flat).view(B * HW, T, self.num_heads, self.head_dim).transpose(1, 2)
+    def forward(self, x, other, frames, locations):
+        x = self.norms[0](x + self.self_attention(x, x, x, need_weights=False)[0])
+        x = self.norms[1](x + self.cross_attention(x, other, frames, locations))
+        return self.norms[2](x + self.ffn(x))
 
-            # Attention
-            scores = torch.matmul(q_p, k_p.transpose(-2, -1)) / (self.head_dim ** 0.5)
-            attn = torch.softmax(scores, dim=-1)
-            context = torch.matmul(attn, v_p)
-
-            # Reshape back
-            context = context.transpose(1, 2).contiguous().view(B * HW, T, self.embed_dim)
-            output = self.out_proj(context)
-            output = output.view(B, HW, T, self.embed_dim).permute(0, 2, 1, 3).contiguous().view(B, seq_len, self.embed_dim)
-
-        elif self.mode == 'branch2':
-            # Q[t,n] attends to K[t,:] CEUS-to-BUS
-            q_reshaped = q.view(B, T, HW, self.embed_dim)
-            k_reshaped = k.view(B, T, HW, self.embed_dim)
-            v_reshaped = v.view(B, T, HW, self.embed_dim)
-
-            # Flatten for attention: (B*T, HW, embed_dim)
-            q_flat = q_reshaped.view(B * T, HW, self.embed_dim)
-            k_flat = k_reshaped.view(B * T, HW, self.embed_dim)
-            v_flat = v_reshaped.view(B * T, HW, self.embed_dim)
-
-            # Projections
-            q_p = self.q_proj(q_flat).view(B * T, HW, self.num_heads, self.head_dim).transpose(1, 2)
-            k_p = self.k_proj(k_flat).view(B * T, HW, self.num_heads, self.head_dim).transpose(1, 2)
-            v_p = self.v_proj(v_flat).view(B * T, HW, self.num_heads, self.head_dim).transpose(1, 2)
-
-            # Attention
-            scores = torch.matmul(q_p, k_p.transpose(-2, -1)) / (self.head_dim ** 0.5)
-            attn = torch.softmax(scores, dim=-1)
-            context = torch.matmul(attn, v_p)
-
-            # Reshape back
-            context = context.transpose(1, 2).contiguous().view(B * T, HW, self.embed_dim)
-            output = self.out_proj(context)
-            output = output.view(B, T, HW, self.embed_dim).view(B, seq_len, self.embed_dim)
-
-        return output
-
-class ACMST_TransformerBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, mode, T=16, HW=49, ff_dim=2048, dropout=0.1):
-        super(ACMST_TransformerBlock, self).__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attn = AsymmetricCrossAttention(embed_dim, num_heads, mode, T, HW)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.norm3 = nn.LayerNorm(embed_dim)
-        self.ff = nn.Sequential(
-            nn.Linear(embed_dim, ff_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, embed_dim),
-            nn.Dropout(dropout)
-        )
-
-    def forward(self, x, cross_k, cross_v):
-        # Self-attention
-        attn_out, _ = self.self_attn(x, x, x)
-        x = self.norm1(x + attn_out)
-
-        # Cross-attention
-        cross_out = self.cross_attn(x, cross_k, cross_v)
-        x = self.norm2(x + cross_out)
-
-        # Feed-forward
-        ff_out = self.ff(x)
-        x = self.norm3(x + ff_out)
-        return x
 
 class DualStreamNetwork(nn.Module):
-    def __init__(self, embed_dim=384, num_layers=6, num_heads=6, T=16, HW=49):
-        super(DualStreamNetwork, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_layers = num_layers
-        self.T = T
-        self.HW = HW
+    def __init__(self, embed_dim, num_layers, num_heads, frames, locations):
+        super().__init__()
+        self.position = nn.Parameter(torch.randn(1, frames * locations, embed_dim) * 0.02)
+        self.bus_blocks = nn.ModuleList([ACMSTBlock(embed_dim, num_heads, "temporal") for _ in range(num_layers)])
+        self.ceus_blocks = nn.ModuleList([ACMSTBlock(embed_dim, num_heads, "spatial") for _ in range(num_layers)])
 
-        # Positional encoding
-        self.pos_embed = nn.Parameter(torch.randn(1, T * HW, embed_dim))
-
-        # Two branches
-        self.branch1 = nn.ModuleList([ACMST_TransformerBlock(embed_dim, num_heads, mode='branch1', T=T, HW=HW) for _ in range(num_layers)])
-        self.branch2 = nn.ModuleList([ACMST_TransformerBlock(embed_dim, num_heads, mode='branch2', T=T, HW=HW) for _ in range(num_layers)])
-
-    def forward(self, feat1, feat2):
-        # feat1, feat2: (B, embed_dim, T, HW)
-        B, embed_dim, T, HW = feat1.shape
-        seq_len = T * HW
-
-        # Reshape to (B, seq_len, embed_dim)
-        feat1 = feat1.view(B, embed_dim, seq_len).transpose(1, 2)  # (B, seq_len, embed_dim)
-        feat2 = feat2.view(B, embed_dim, seq_len).transpose(1, 2)
-
-        # Add positional encoding
-        feat1 = feat1 + self.pos_embed
-        feat2 = feat2 + self.pos_embed
-
-        # Process through layers
-        for i in range(self.num_layers):
-            feat1 = self.branch1[i](feat1, feat2, feat2)
-            feat2 = self.branch2[i](feat2, feat1, feat1)
-
-        # Average the two branches
-        output = (feat1 + feat2) / 2  # (B, seq_len, embed_dim)
-
-        # Global average pooling
-        output = output.mean(dim=1)  # (B, embed_dim)
-
-        return output
+    def forward(self, bus, ceus):
+        b, c, t, h, w = bus.shape
+        n = h * w
+        def tokenize(x):
+            return x.permute(0, 2, 3, 4, 1).reshape(b, t * n, c) + self.position
+        bus, ceus = tokenize(bus), tokenize(ceus)
+        for bus_block, ceus_block in zip(self.bus_blocks, self.ceus_blocks):
+            previous_bus, previous_ceus = bus, ceus
+            bus = bus_block(previous_bus, previous_ceus, t, n)
+            ceus = ceus_block(previous_ceus, previous_bus, t, n)
+        return (bus + ceus).mean(1)
 
 
 class AsyCMST(nn.Module):
-    def __init__(self, embed_dim=384, num_classes=2, num_layers=6, num_heads=6, sample_duration=16, sample_size=224):
-        super(AsyCMST, self).__init__()
-        self.sample_duration = sample_duration
-        self.sample_size = sample_size
-        self.T = sample_duration
-        self.H = self.W = sample_size
-        self.HW = (self.H // 32) ** 2  # Assuming ResNet18 downsampling to 7x7 for 224x224
-        self.frame_encoder = FrameFeatureEncoding(embed_dim)
-        self.dual_stream = DualStreamNetwork(embed_dim, num_layers, num_heads, self.T, self.HW)
+    def __init__(self, embed_dim=384, num_classes=2, num_layers=6, num_heads=6,
+                 sample_duration=16, sample_size=224, use_mask=False, pretrained=False):
+        super().__init__()
+        locations = (sample_size // 32) ** 2
+        self.use_mask = use_mask
+        self.bus_encoder = FrameFeatureEncoder(embed_dim, pretrained)
+        self.ceus_encoder = FrameFeatureEncoder(embed_dim, pretrained)
+        self.frame_sorting = FrameSelfSorting(embed_dim)
+        self.mask_decoder = MaskDecoder(embed_dim) if use_mask else None
+        self.dual_stream = DualStreamNetwork(embed_dim, num_layers, num_heads, sample_duration, locations)
         self.classifier = nn.Linear(embed_dim, num_classes)
 
-    def forward(self, x1, x2):
-        feat1 = self.frame_encoder(x1) # BUS
-        feat2 = self.frame_encoder(x2) # CEUS
-        features = self.dual_stream(feat1, feat2)
-        logits = self.classifier(features)
-        return logits
+    def forward(self, bus, ceus, return_aux=False):
+        bus_features, ceus_features = self.bus_encoder(bus), self.ceus_encoder(ceus)
+        logits = self.classifier(self.dual_stream(bus_features, ceus_features))
+        if not return_aux:
+            return logits
+        output = {"logits": logits, "frame_scores": self.frame_sorting(ceus_features)}
+        if self.use_mask:
+            output["mask_logits"] = self.mask_decoder(bus_features, bus.shape[-2:])
+        return output
 
 
-if __name__ == "__main__":
-    # Test
-    from datetime import datetime
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = AsyCMST(embed_dim=384, num_classes=2, sample_duration=16, sample_size=224).to(device)
-    for i in range(1000):
-        start_time = datetime.now()       
-        batch_size = 16
-        x1 = torch.randn(batch_size, 3, 16, 224, 224).to(device)
-        x2 = torch.randn(batch_size, 3, 16, 224, 224).to(device)
-        output = model(x1, x2)
-        end_time = datetime.now()
-        # time_ms = float((end_time - start_time).seconds) * 1000 / batch_size
-        time_ms = (end_time - start_time).total_seconds() * 1000 / batch_size
-
-        print(output.shape, time_ms)  # Should be (batch_size, num_classes)
+def dice_loss(logits, targets, eps=1e-6):
+    probabilities, targets = torch.sigmoid(logits), targets.float()
+    dims = tuple(range(1, targets.ndim))
+    intersection = (probabilities * targets).sum(dims)
+    denominator = probabilities.sum(dims) + targets.sum(dims)
+    return (1 - (2 * intersection + eps) / (denominator + eps)).mean()

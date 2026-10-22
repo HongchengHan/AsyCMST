@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from glob2 import glob
+from glob import glob
 import os
 from PIL import Image
 from easydict import EasyDict as edict
@@ -101,7 +101,8 @@ class BUS_CEUS_Classification(Dataset):
 class BUS_CEUS_Classification_Images(Dataset):
     def __init__(self, root_dir, label_csv, video_size=224, 
                  num_frm=16, start_sec=0.0, end_sec=10.0, 
-                 mode='train', augment=False, aug=None) -> None:
+                 mode='train', augment=False, aug=None, use_mask=False,
+                 mask_column='mask_dir', mask_root='masks') -> None:
         super().__init__()
         self.root_dir = root_dir
         self.video_size = (video_size, video_size)
@@ -111,10 +112,25 @@ class BUS_CEUS_Classification_Images(Dataset):
         self.mode = mode
         self.augment = augment
         self.aug = aug
-        self.ids = np.array(pd.read_csv(os.path.join(root_dir, label_csv))['id'])
-        self.bus_ids = np.array(pd.read_csv(os.path.join(root_dir, label_csv))['bus_vid'])
-        self.ceus_ids = np.array(pd.read_csv(os.path.join(root_dir, label_csv))['ceus_vid'])
-        self.labels = np.array(pd.read_csv(os.path.join(root_dir, label_csv))['label'])
+        csv_path = os.path.join(root_dir, label_csv)
+        if not os.path.isfile(csv_path):
+            available = sorted(os.path.basename(path) for path in glob(os.path.join(root_dir, '*.csv')))
+            hint = f" Available CSV files: {', '.join(available)}." if available else ''
+            raise FileNotFoundError(
+                f"Split CSV not found: {csv_path}.{hint} "
+                "Create splits with preprocess/split_dataset.py or update data.root_dir and the split labels."
+            )
+        table = pd.read_csv(csv_path)
+        self.ids = np.array(table['id'])
+        self.bus_ids = np.array(table['bus_vid'])
+        self.ceus_ids = np.array(table['ceus_vid'])
+        self.labels = np.array(table['label'])
+        self.use_mask = use_mask
+        self.mask_root = mask_root
+        if use_mask:
+            if mask_column not in table:
+                raise ValueError(f"use_mask=true requires CSV column '{mask_column}'")
+            self.mask_ids = np.array(table[mask_column])
         self.category = {'0': '0.ben', '1':'1.mal'}
         
     def __len__(self) -> int:
@@ -122,7 +138,9 @@ class BUS_CEUS_Classification_Images(Dataset):
     
     
     def get_images(self, image_dir, roi_box=None):
-        image_path_list = glob(os.path.join(image_dir, '*'))
+        image_path_list = sorted(glob(os.path.join(image_dir, '*')))
+        if not image_path_list:
+            raise FileNotFoundError(f'No frames found in {image_dir}')
         selected_indexes = np.linspace(0, len(image_path_list)-1, self.num_frm).astype(int).tolist()
         if not roi_box is None:
             # image_list = [img.crop(roi_box) for img in image_list]
@@ -144,16 +162,16 @@ class BUS_CEUS_Classification_Images(Dataset):
     #     ])
     #     return s_trans
     
-    def preprocess_video(self, bus_image_list, ceus_image_list):
+    def preprocess_video(self, bus_image_list, ceus_image_list, mask_image_list=None):
         # s_trans = self.spatial_transform()
         transform_list = []
         
-        if self.mode == 'train':
+        if self.mode == 'train' and self.augment:
             # seed = random.randint(0, 100)
             torch.random.seed()
             
             p = random.randint(0, 1)
-            transform_list.append(transforms.RandomHorizontalFlip(p))
+            transform_list.append(transforms.RandomVerticalFlip(p))
 
             p = random.randint(0, 1)
             transform_list.append(transforms.RandomHorizontalFlip(p))
@@ -172,15 +190,28 @@ class BUS_CEUS_Classification_Images(Dataset):
         
         s_trans = transforms.Compose(transform_list)
         
-        bus_augmented_frames = [s_trans(img) for img in bus_image_list]
+        # Replay one random transform for all frames and both modalities.
+        seed = random.randint(0, 2**31 - 1)
+        def apply_same(images):
+            result = []
+            for img in images:
+                random.seed(seed)
+                torch.manual_seed(seed)
+                result.append(s_trans(img))
+            return result
+        bus_augmented_frames = apply_same(bus_image_list)
         bus_augmented_video = torch.stack([frame for frame in bus_augmented_frames]) # T, C, H, W
         bus_segment = bus_augmented_video.permute(1, 0, 2, 3) # C, T, H, W
         
-        ceus_augmented_frames = [s_trans(img) for img in ceus_image_list]
+        ceus_augmented_frames = apply_same(ceus_image_list)
         ceus_augmented_video = torch.stack([frame for frame in ceus_augmented_frames]) # T, C, H, W
         ceus_segment = ceus_augmented_video.permute(1, 0, 2, 3) # C, T, H, W
         
-        return bus_segment, ceus_segment
+        mask_segment = None
+        if mask_image_list is not None:
+            mask_segment = torch.stack(apply_same(mask_image_list))[:, :1]
+            mask_segment = (mask_segment >= 0.5).float()[:, 0]
+        return bus_segment, ceus_segment, mask_segment
 
     def test(self):
         print(self.category)
@@ -191,13 +222,22 @@ class BUS_CEUS_Classification_Images(Dataset):
         ceus_path = os.path.join(self.root_dir, 'images', self.category[str(self.labels[index])], 'ceus', self.ceus_ids[index][:-4])
         vid_bus = self.get_images(bus_path)
         vid_ceus = self.get_images(ceus_path)
-        segment_bus, segment_ceus = self.preprocess_video(vid_bus, vid_ceus)
+        masks = None
+        if self.use_mask:
+            mask_path = str(self.mask_ids[index])
+            if not os.path.isabs(mask_path):
+                mask_path = os.path.join(self.root_dir, self.mask_root, mask_path)
+            masks = [image.convert('L') for image in self.get_images(mask_path)]
+        segment_bus, segment_ceus, segment_mask = self.preprocess_video(vid_bus, vid_ceus, masks)
         bn_label = np.array(self.labels[index])
         bn_label = torch.from_numpy(bn_label).type(torch.LongTensor)
         
-        return {'segment_bus': segment_bus, 
+        sample = {'segment_bus': segment_bus,
                 'segment_ceus': segment_ceus, 
                 'label': bn_label}
+        if segment_mask is not None:
+            sample['mask'] = segment_mask
+        return sample
 
 
 if __name__ == '__main__':
@@ -229,4 +269,4 @@ if __name__ == '__main__':
         print(vid_bus.size(), vid_ceus.size(), torch.max(vid_bus[0, :, 8, :, :]), torch.max(vid_ceus[0, :, 8, :, :]))
         i += 1
     
-   
+

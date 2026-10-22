@@ -1,0 +1,20 @@
+# Local datasets (large and/or private)
+/datasets/
+
+# Training, evaluation, and TensorBoard outputs
+/runs/
+/results/
+/logs/
+/None/
+events.out.tfevents.*
+*.pth
+*.pt
+*.ckpt
+
+# Local paper copy
+/1-s2.0-S1361841526001969-main.pdf
+
+# Python runtime caches
+__pycache__/
+*.py[cod]
+

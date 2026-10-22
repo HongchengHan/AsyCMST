@@ -2,17 +2,33 @@
 
 This repository contains the pre-released code for AsyCMST, a method for asymmetric cross-modal spatio-temporal learning applied to multimodal ultrasound nodule recognition. The model leverages both B-mode and Contrast-Enhanced Ultrasound (CEUS) data for improved diagnosis.
 
+## Framework
+
+![AsyCMST framework](assets/framework.png)
+
 ## Features
 
 - Multimodal ultrasound analysis (B-mode and CEUS)
 - Spatio-temporal learning approach
 - Asymmetric cross-modal integration
+- Paper-aligned CEUS frame self-sorting and optional BUS segmentation supervision
 
 ## Data
 
 A subset of the multimodal ultrasound nodule diagnosis dataset can be downloaded from [XJTU-MMUS-subset-20260401.zip (Google Drive)](https://drive.google.com/file/d/1JQtKzFBBRXw9AyCcMGQ64Va-CnmCVmA5/view?usp=drive_link).
 
 Place the downloaded data in the `datasets` directory. The videos are in the `videos` directory, and we extract selected frames from the videos to accelerate data loading during training. The extracted frames are in the `images` directory.
+
+If the downloaded frame archive contains only `ceus_label_selected.csv`, create the
+paper's 5:2:3 train/validation/test split first:
+
+```bash
+python preprocess/split_dataset.py \
+  --input datasets/CEUS_splitted_frames/ceus_label_selected.csv
+```
+
+This creates `train_1.csv`, `valid_1.csv`, and `test_1.csv` beside the source CSV.
+The bundled AsyCMST configs use `datasets/CEUS_splitted_frames` by default.
 
 The expected directory structure is:
 
@@ -67,15 +83,42 @@ Edit the configuration files in the `config/` directory for your setup. Availabl
 - `train_tsnet_rx50_bus_ceus.yaml`
 - `test_asycmst_bus_ceus.yaml`
 
+Mask supervision is disabled by default (`data.use_mask: false`), so datasets without
+segmentation annotations work directly. To enable it, set `use_mask: true`. The split
+CSV must then contain the column configured by `mask_column` (default `mask_dir`). Each
+value is an absolute mask-frame directory or a path relative to
+`<root_dir>/<mask_root>`. Mask filenames are sorted and uniformly sampled just like the
+BUS/CEUS frames.
+
 ## Training
 
-Run the training notebook:
-- Open `train_model.ipynb` in Jupyter and execute the cells.
+Run training from the command line:
+
+```bash
+python train.py --config config/train_asycmst_bus_ceus.yaml
+```
+
+For a quick end-to-end smoke test (one train batch and one validation batch):
+
+```bash
+python train.py --config config/train_asycmst_bus_ceus.yaml \
+  --epochs 1 --batch-size 1 --num-workers 0 \
+  --max-train-batches 1 --max-valid-batches 1
+```
 
 ## Evaluation
 
-Run the evaluation notebook:
-- Open `eval_model.ipynb` in Jupyter and execute the cells.
+Run evaluation/inference from the command line:
+
+```bash
+python evaluate.py --config config/test_asycmst_bus_ceus.yaml \
+  --checkpoint runs/BUS-CEUS-Cls/<run>/ckpt/best.pth
+```
+
+Add `--max-batches 1 --batch-size 1 --num-workers 0` for a quick inference smoke test.
+
+Predictions and metrics are written to `results/` by default. The former notebooks
+have been replaced by the maintained `train.py` and `evaluate.py` entry points.
 
 ## Models
 
@@ -88,8 +131,17 @@ Pre-trained models are available in the `models/` directory:
 
 If you use this code, please cite:
 
-```
-Under review
+```bibtex
+@article{HAN2026104127,
+  title = {AsyCMST: Asymmetric cross-modal spatio-temporal learning for multimodal ultrasound nodule recognition},
+  journal = {Medical Image Analysis},
+  volume = {112},
+  pages = {104127},
+  year = {2026},
+  issn = {1361-8415},
+  doi = {https://doi.org/10.1016/j.media.2026.104127},
+  author = {Hongcheng Han and Zhiqiang Tian and Minghao Wang and Yutong Zhang and Dong Zhang and Qinbo Guo and Jue Jiang and Hui Guo and Shaoyi Du and Juan Wang},
+}
 ```
 
 ## License

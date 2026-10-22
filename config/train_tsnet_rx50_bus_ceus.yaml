@@ -15,18 +15,19 @@ model:
     load_path: None
     freeze: False
 save:
-    path: None
-    exp: None
-    num_ckpt: None
+    path: null
+    exp: null
+    num_ckpt: null
 
 data:
-    root_dir: './datasets/XJTU-MMUS-subset-20260401'
+    root_dir: './datasets/CEUS_splitted_frames'
     train_label: 'train_1.csv'
     valid_label: 'valid_1.csv'
     test_label: 'test_1.csv'
     num_class: 2
     size: 224
     num_frm: 16
+    num_workers: 4
     header: True
     name: 'XJTU-MMUS'
     augment: True

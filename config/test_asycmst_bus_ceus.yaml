@@ -12,21 +12,25 @@ params:
 model:
     name: asycmst_r18_384_6_6
     pretrain: False
-    load_path: "runs/BUS-CEUS-Cls/2026_04_01_22_09_08_asycmst_r18_384_6_6/ckpt/val_acc_0.5000_epoch_023.pth"
+    load_path: null  # Set this or pass --checkpoint to evaluate.py
     freeze: False
 save:
-    path: None
-    exp: None
-    num_ckpt: None
+    path: null
+    exp: null
+    num_ckpt: null
 
 data:
-    root_dir: './datasets/XJTU-MMUS-subset-20260401'
+    root_dir: './datasets/CEUS_splitted_frames'
     train_label: 'train_1.csv'
     valid_label: 'valid_1.csv'
     test_label: 'test_1.csv'
     num_class: 2
     size: 224
     num_frm: 16
+    num_workers: 4
+    use_mask: false
+    mask_column: mask_dir
+    mask_root: masks
     header: True
     name: 'XJTU-MMUS'
     augment: True

@@ -9,24 +9,31 @@ params:
     w_decay: 0.0001
     momentum: 0.9
     ECLossWeight: [1.0, 1.0]
+    fss_weight: 0.4
+    seg_weight: 0.4
 model:
     name: asycmst_r18_384_6_6
     pretrain: False
     load_path: None
     freeze: False
 save:
-    path: None
-    exp: None
-    num_ckpt: None
+    path: null
+    exp: null
+    num_ckpt: null
 
 data:
-    root_dir: './datasets/XJTU-MMUS-subset-20260401'
+    root_dir: './datasets/CEUS_splitted_frames'
     train_label: 'train_1.csv'
     valid_label: 'valid_1.csv'
     test_label: 'test_1.csv'
     num_class: 2
     size: 224
     num_frm: 16
+    num_workers: 4
+    # Optional BUS segmentation supervision. No masks are read by default.
+    use_mask: false
+    mask_column: mask_dir
+    mask_root: masks
     header: True
     name: 'XJTU-MMUS'
     augment: True
