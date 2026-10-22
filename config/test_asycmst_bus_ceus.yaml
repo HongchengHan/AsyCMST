@@ -1,7 +1,7 @@
 ---
 task: 'BUS-CEUS-Cls-Test'
 params:
-    batch_size: 4
+    batch_size: 8
     epoch: 200
     lr: 0.001
     factor: 0.1
@@ -27,7 +27,7 @@ data:
     num_class: 2
     size: 224
     num_frm: 16
-    num_workers: 4
+    num_workers: 8
     use_mask: false
     mask_column: mask_dir
     mask_root: masks

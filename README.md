@@ -90,6 +90,10 @@ value is an absolute mask-frame directory or a path relative to
 `<root_dir>/<mask_root>`. Mask filenames are sorted and uniformly sampled just like the
 BUS/CEUS frames.
 
+The auxiliary loss weights can be adjusted independently under `params`. The default
+configuration uses `fss_weight: 0.1` and `seg_weight: 0.4`; increase the FSS weight
+toward the paper setting of `0.4` when stronger temporal-order supervision is desired.
+
 ## Training
 
 Run training from the command line:
