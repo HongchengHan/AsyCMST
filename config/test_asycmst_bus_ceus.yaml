@@ -11,7 +11,9 @@ params:
     ECLossWeight: [1.0, 1.0]
 model:
     name: asycmst_r18_384_6_6
-    pretrain: False
+    pretrain: True
+    cross_gate_init: 0.1
+    cross_attention_start_layer: 3
     load_path: null  # Set this or pass --checkpoint to evaluate.py
     freeze: False
 save:
@@ -28,6 +30,7 @@ data:
     size: 224
     num_frm: 16
     num_workers: 8
+    normalize: true
     use_mask: false
     mask_column: mask_dir
     mask_root: masks

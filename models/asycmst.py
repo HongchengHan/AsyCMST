@@ -94,26 +94,43 @@ class AsymmetricCrossAttention(nn.Module):
 
 
 class ACMSTBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, direction, ff_dim=2048, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, direction, ff_dim=2048, dropout=0.1,
+                 cross_gate_init=0.1, use_cross_attention=True):
         super().__init__()
         self.self_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attention = AsymmetricCrossAttention(embed_dim, num_heads, direction)
+        self.cross_attention = (AsymmetricCrossAttention(embed_dim, num_heads, direction)
+                                if use_cross_attention else None)
+        self.cross_gate = (nn.Parameter(torch.tensor(float(cross_gate_init)))
+                           if use_cross_attention else None)
         self.norms = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(3)])
         self.ffn = nn.Sequential(nn.Linear(embed_dim, ff_dim), nn.ReLU(), nn.Dropout(dropout),
                                  nn.Linear(ff_dim, embed_dim), nn.Dropout(dropout))
 
     def forward(self, x, other, frames, locations):
         x = self.norms[0](x + self.self_attention(x, x, x, need_weights=False)[0])
-        x = self.norms[1](x + self.cross_attention(x, other, frames, locations))
+        if self.cross_attention is not None:
+            cross_features = self.cross_attention(x, other, frames, locations)
+            x = self.norms[1](x + self.cross_gate * cross_features)
         return self.norms[2](x + self.ffn(x))
 
 
 class DualStreamNetwork(nn.Module):
-    def __init__(self, embed_dim, num_layers, num_heads, frames, locations):
+    def __init__(self, embed_dim, num_layers, num_heads, frames, locations,
+                 cross_gate_init=0.1, cross_attention_start_layer=3):
         super().__init__()
+        if not 0 <= cross_attention_start_layer <= num_layers:
+            raise ValueError('cross_attention_start_layer must be between 0 and num_layers')
         self.position = nn.Parameter(torch.randn(1, frames * locations, embed_dim) * 0.02)
-        self.bus_blocks = nn.ModuleList([ACMSTBlock(embed_dim, num_heads, "temporal") for _ in range(num_layers)])
-        self.ceus_blocks = nn.ModuleList([ACMSTBlock(embed_dim, num_heads, "spatial") for _ in range(num_layers)])
+        self.bus_blocks = nn.ModuleList([
+            ACMSTBlock(embed_dim, num_heads, "temporal", cross_gate_init=cross_gate_init,
+                       use_cross_attention=layer >= cross_attention_start_layer)
+            for layer in range(num_layers)
+        ])
+        self.ceus_blocks = nn.ModuleList([
+            ACMSTBlock(embed_dim, num_heads, "spatial", cross_gate_init=cross_gate_init,
+                       use_cross_attention=layer >= cross_attention_start_layer)
+            for layer in range(num_layers)
+        ])
 
     def forward(self, bus, ceus):
         b, c, t, h, w = bus.shape
@@ -130,7 +147,8 @@ class DualStreamNetwork(nn.Module):
 
 class AsyCMST(nn.Module):
     def __init__(self, embed_dim=384, num_classes=2, num_layers=6, num_heads=6,
-                 sample_duration=16, sample_size=224, use_mask=False, pretrained=False):
+                 sample_duration=16, sample_size=224, use_mask=False, pretrained=False,
+                 cross_gate_init=0.1, cross_attention_start_layer=3):
         super().__init__()
         locations = (sample_size // 32) ** 2
         self.use_mask = use_mask
@@ -138,7 +156,9 @@ class AsyCMST(nn.Module):
         self.ceus_encoder = FrameFeatureEncoder(embed_dim, pretrained)
         self.frame_sorting = FrameSelfSorting(embed_dim)
         self.mask_decoder = MaskDecoder(embed_dim) if use_mask else None
-        self.dual_stream = DualStreamNetwork(embed_dim, num_layers, num_heads, sample_duration, locations)
+        self.dual_stream = DualStreamNetwork(
+            embed_dim, num_layers, num_heads, sample_duration, locations,
+            cross_gate_init, cross_attention_start_layer)
         self.classifier = nn.Linear(embed_dim, num_classes)
 
     def forward(self, bus, ceus, return_aux=False):

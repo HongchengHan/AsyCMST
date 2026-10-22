@@ -102,7 +102,7 @@ class BUS_CEUS_Classification_Images(Dataset):
     def __init__(self, root_dir, label_csv, video_size=224, 
                  num_frm=16, start_sec=0.0, end_sec=10.0, 
                  mode='train', augment=False, aug=None, use_mask=False,
-                 mask_column='mask_dir', mask_root='masks') -> None:
+                 mask_column='mask_dir', mask_root='masks', normalize=True) -> None:
         super().__init__()
         self.root_dir = root_dir
         self.video_size = (video_size, video_size)
@@ -112,6 +112,9 @@ class BUS_CEUS_Classification_Images(Dataset):
         self.mode = mode
         self.augment = augment
         self.aug = aug
+        self.normalize = normalize
+        self.image_normalizer = transforms.Normalize(
+            mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         csv_path = os.path.join(root_dir, label_csv)
         if not os.path.isfile(csv_path):
             available = sorted(os.path.basename(path) for path in glob(os.path.join(root_dir, '*.csv')))
@@ -201,10 +204,14 @@ class BUS_CEUS_Classification_Images(Dataset):
             return result
         bus_augmented_frames = apply_same(bus_image_list)
         bus_augmented_video = torch.stack([frame for frame in bus_augmented_frames]) # T, C, H, W
+        if self.normalize:
+            bus_augmented_video = self.image_normalizer(bus_augmented_video)
         bus_segment = bus_augmented_video.permute(1, 0, 2, 3) # C, T, H, W
         
         ceus_augmented_frames = apply_same(ceus_image_list)
         ceus_augmented_video = torch.stack([frame for frame in ceus_augmented_frames]) # T, C, H, W
+        if self.normalize:
+            ceus_augmented_video = self.image_normalizer(ceus_augmented_video)
         ceus_segment = ceus_augmented_video.permute(1, 0, 2, 3) # C, T, H, W
         
         mask_segment = None

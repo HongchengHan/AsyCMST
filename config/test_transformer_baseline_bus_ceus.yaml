@@ -1,0 +1,26 @@
+---
+task: 'BUS-CEUS-Transformer-Baseline-Test'
+params:
+    batch_size: 8
+model:
+    name: dual_transformer_baseline
+    pretrain: True
+    embed_dim: 256
+    num_layers: 2
+    num_heads: 8
+    dropout: 0.1
+    load_path: null
+data:
+    root_dir: './datasets/CEUS_splitted_frames'
+    train_label: 'train_1.csv'
+    valid_label: 'valid_1.csv'
+    test_label: 'test_1.csv'
+    num_class: 2
+    size: 224
+    num_frm: 16
+    num_workers: 8
+    normalize: true
+    use_mask: false
+    augment: false
+device:
+    single: 'cuda:0'

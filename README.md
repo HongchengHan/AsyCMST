@@ -80,8 +80,12 @@ datasets/
 
 Edit the configuration files in the `config/` directory for your setup. Available configs:
 - `train_asycmst_bus_ceus.yaml`
+- `train_baseline_bus_ceus.yaml`
+- `train_transformer_baseline_bus_ceus.yaml`
 - `train_tsnet_rx50_bus_ceus.yaml`
 - `test_asycmst_bus_ceus.yaml`
+- `test_baseline_bus_ceus.yaml`
+- `test_transformer_baseline_bus_ceus.yaml`
 
 Mask supervision is disabled by default (`data.use_mask: false`), so datasets without
 segmentation annotations work directly. To enable it, set `use_mask: true`. The split
@@ -94,12 +98,45 @@ The auxiliary loss weights can be adjusted independently under `params`. The def
 configuration uses `fss_weight: 0.1` and `seg_weight: 0.4`; increase the FSS weight
 toward the paper setting of `0.4` when stronger temporal-order supervision is desired.
 
+The default optimizer is AdamW with a learning rate of `1e-4`, which is stable for
+fine-tuning the dual encoders at batch size 8. RMSprop remains available by setting
+`optimizer: rmsprop`; use a smaller learning rate when training from scratch and do not
+resume a checkpoint whose encoder outputs have already collapsed.
+
+The AsyCMST configuration uses ImageNet-pretrained ResNet-18 encoders and matching input
+normalization. Classification weights default to `auto`, which computes inverse-frequency
+weights from the training split to reduce majority-class prediction bias.
+
+Each ACMST block uses an independent learnable residual gate for cross-modal features.
+`model.cross_gate_init` controls its initial value (default `0.1`), so training begins
+close to the modality-specific residual paths and learns the required interaction strength
+separately at every layer and direction.
+
+By default, cross attention is enabled only in Transformer layers 4–6. This is controlled
+by the zero-based `model.cross_attention_start_layer: 3`: use `0` for all six layers,
+`5` for only the final layer, or `6` to disable cross attention entirely.
+
 ## Training
 
 Run training from the command line:
 
 ```bash
 python train.py --config config/train_asycmst_bus_ceus.yaml
+```
+
+To diagnose the data and optimization pipeline without Transformer, cross attention,
+FSS, or segmentation, train the dual-ResNet late-fusion baseline:
+
+```bash
+python train.py --config config/train_baseline_bus_ceus.yaml
+```
+
+To isolate temporal Transformer self-attention without cross-modal attention, use the
+dual-stream baseline (spatially pooled ResNet frame tokens, two Transformer layers per
+modality, CLS-token pooling, and late fusion):
+
+```bash
+python train.py --config config/train_transformer_baseline_bus_ceus.yaml
 ```
 
 For a quick end-to-end smoke test (one train batch and one validation batch):
@@ -116,13 +153,15 @@ Run evaluation/inference from the command line:
 
 ```bash
 python evaluate.py --config config/test_asycmst_bus_ceus.yaml \
-  --checkpoint runs/BUS-CEUS-Cls/<run>/ckpt/best.pth
+  --checkpoint runs/BUS-CEUS-Cls/<run>/ckpt/best_auc.pth
 ```
 
 Add `--max-batches 1 --batch-size 1 --num-workers 0` for a quick inference smoke test.
 
 Predictions and metrics are written to `results/` by default. The former notebooks
 have been replaced by the maintained `train.py` and `evaluate.py` entry points.
+Training saves both `best_loss.pth` and `best_auc.pth` because a model can improve its
+ranking performance before its probabilities are calibrated around the 0.5 threshold.
 
 ## Models
 
